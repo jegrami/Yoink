@@ -10,3 +10,8 @@ wheels/
 .venv
 .vscode/
 
+# Log / downloads
+DEVLOG.md
+downloads/
+
+

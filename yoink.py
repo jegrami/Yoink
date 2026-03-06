@@ -5,11 +5,11 @@ yoink.py
 --------
 CLI tool to download YouTube videos in best available quality.
 
-- Downloads highest quality video + audio using adaptive mode
-- Uses ffmpeg for merging when needed
-- Falls back to progressive mode if adaptive stream is not available or ffmpeg is not installed
-- Progress bars via tqdm
-- Output directory configurable
+- Downloads highest quality streams using DASH (Dynamic Adaptive Stream Over HTTP)
+- Uses ffmpeg for merging video and audio tracks with lightning speed
+- Falls back to Progressive mode if DASH is not available or ffmpeg is not installed
+- Implements progress bars with tqdm
+- Allows output directory configuration
 
 Author: Jeremiah Igrami
 
@@ -44,7 +44,7 @@ BLUE = f"{ESC}[94m"
 MAGENTA = f"{ESC}[95m"
 
 
-# === Loging definition ===
+# === Messages that get printed to stdout ===
 LOG_INFO = f"{BLUE}[+]{RESET}"
 LOG_OK   = f"{GREEN}[✓]{RESET}"
 LOG_WARN = f"{YELLOW}[!]{RESET}"
@@ -61,7 +61,9 @@ def sanitize_filename(name: str, replacement: str = "_") -> str:
 
 
 def resolution_value(stream) -> int:
-    """Return the stream resolution as int (e.g. '1080p' -> 1080) or 0 if unknown."""
+    """Return the stream resolution as int (e.g. '1080p' -> 1080) or 0 if unknown.
+       This will help yoink decide the best available quality by comparing resolutions
+    """
     if not stream or not getattr(stream, "resolution", None):
         return 0
     try:
@@ -71,7 +73,7 @@ def resolution_value(stream) -> int:
 
 
 def is_ffmpeg_available() -> bool:
-    """Return True if ffmpeg is available on PATH."""
+    """Return True if ffmpeg is available in PATH."""
     return shutil.which("ffmpeg") is not None
 
 
@@ -79,10 +81,10 @@ def create_progress_bar(
     total_bytes: Optional[int],
     desc: str,
     position: int = 0,
-    color: str = "green",
+    colour: str = "green",
 ) -> tqdm:
     """
-    Create a tqdm progress bar with a 'pip-like' style:
+    Create a tqdm progress bar (pip style):
 
     - colored bar
     - shows downloaded size, total size, speed, elapsed time
@@ -99,7 +101,7 @@ def create_progress_bar(
         ascii=False,
         position=position,
         leave=True,
-        color=color,     
+        colour=colour,     
         dynamic_ncols=True,
         bar_format=(
             "{l_bar}{bar} "
@@ -116,19 +118,20 @@ def download_with_progress(
     output_dir: Path,
     description: str,
     filename: Optional[str] = None,
-    color: str = "green",
+    colour: str = "green",
 ) -> Path:
     """
     Show progress bar when downloading stream, including how many bytes 
     have been downloaded and how many left.
 
     Returns the Path to the downloaded file.
+
     """
     total_size = getattr(stream, "filesize", None)
     if total_size is None:
         total_size = getattr(stream, "filesize_approx", None)
 
-    progress_bar = create_progress_bar(total_size, desc=description, color=color)
+    progress_bar = create_progress_bar(total_size, desc=description, colour=colour)
 
     last_bytes_remaining = total_size or 0
 
@@ -157,7 +160,7 @@ def download_with_progress(
 
 
 
-# === Main script logic; everything before this is just warm up === 
+# === Main script logic; everything before this was just warm up === 
 
 def download_video(url: str, output_dir: str = "downloads", force_best_quality: bool = False) -> None:
     """
@@ -242,7 +245,7 @@ def download_video(url: str, output_dir: str = "downloads", force_best_quality: 
         )
 
         
-        # (Recommended) Best quality mode: separate video + audio, then merge with ffmpeg
+        # (Recommended) Adaptive mode: best quality video + audio, then merge with ffmpeg
         if use_adaptive:
             print(
                 f"\n{LOG_INFO} {BOLD}{GREEN}Using high-quality adaptive mode"
@@ -269,7 +272,7 @@ def download_video(url: str, output_dir: str = "downloads", force_best_quality: 
                 output_dir=output_dir_path,
                 description="Downloading video",
                 filename=video_filename,
-                color="green",
+                colour="green",
             )
 
            
@@ -291,7 +294,7 @@ def download_video(url: str, output_dir: str = "downloads", force_best_quality: 
                 output_dir=output_dir_path,
                 description="Downloading audio",
                 filename=audio_filename,
-                color="blue",
+                colour="blue",
             )
 
             
@@ -325,8 +328,8 @@ def download_video(url: str, output_dir: str = "downloads", force_best_quality: 
                 if audio_path.exists():
                     audio_path.unlink()
 
-            print(f"\n{LOG_OK} Download and merge completed!")
-            print(f"{LOG_INFO} Final file: {BOLD}{final_path.resolve()}{RESET}")
+            print(f"\n{LOG_OK} The downloading and merging is complete!")
+            print(f"{LOG_INFO} File in this location: {BOLD}{final_path.resolve()}{RESET}")
 
         
         # Fallback to single progressive stream if adaptive fails
@@ -360,7 +363,7 @@ def download_video(url: str, output_dir: str = "downloads", force_best_quality: 
                 output_dir=output_dir_path,
                 description="Downloading",
                 filename=f"{safe_title}.mp4",
-                color="magenta",
+                colour="magenta",
             )
 
             print(f"\n{LOG_OK} Download completed!")
@@ -379,6 +382,45 @@ def download_video(url: str, output_dir: str = "downloads", force_best_quality: 
         print(f"{LOG_ERR} Unexpected error: {e}")
         sys.exit(1)
 
+
+
+# === The CLI entry point ===
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Downloads a YouTube video in the best available quality.\n"
+            "If ffmpeg is installed and a higher-resolution adaptive stream exists, "
+            "downloads video and audio tracks separately (each with a progress bar) "
+            "and then merges them."
+        )
+    )
+    parser.add_argument(
+        "url",
+        help="URL of the YouTube video to download",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default="downloads",
+        help="Output directory (default: ./downloads)",
+    )
+    parser.add_argument(
+        "-f",
+        "--force-best",
+        action="store_true",
+        help="Force best quality mode (using DASH technique and merging with ffmpeg)",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    download_video(args.url, args.output, args.force_best)
+
+
+if __name__ == "__main__":
+    main()
 
 
 
