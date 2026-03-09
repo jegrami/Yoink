@@ -17,12 +17,14 @@ Author: Jeremiah Igrami
 
 import sys 
 import re 
+import time
 import argparse 
 import shutil
 import subprocess 
 
 from pathlib import Path 
-from typing import Optional, List
+from urllib.parse import parse_qs, urlparse
+from typing import Optional, List, Tuple
 
 from pytubefix import YouTube, Playlist 
 from pytubefix.exceptions import PytubeFixError 
@@ -75,6 +77,60 @@ def resolution_value(stream) -> int:
 def is_ffmpeg_available() -> bool:
     """Return True if ffmpeg is available in PATH."""
     return shutil.which("ffmpeg") is not None
+
+
+def is_playlist_url(url: str) -> bool:
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    return "list" in query or parsed.path.rstrip("/").endswith("/playlist")
+
+
+def safe_playlist_dir_name(title: str) -> str:
+    safe = sanitize_filename(title or "playlist")
+    safe = safe.strip(" .")
+    return safe or "playlist"
+
+
+def select_best_audio_stream(yt: YouTube):
+    """
+    Prefer MP4/M4A audio for safe MP4 alchemy with good old ffmpeg, then fallback to any best audio stream.
+    """
+    preferred = (
+        yt.streams
+        .filter(only_audio=True, file_extension="mp4")
+        .order_by("abr")
+        .desc()
+        .first()
+    )
+    if preferred is not None:
+        return preferred
+
+    return (
+        yt.streams
+        .filter(only_audio=True)
+        .order_by("abr")
+        .desc()
+        .first()
+    )
+
+
+def can_copy_audio_to_mp4(audio_stream) -> bool:
+    """
+    Return True when audio stream is likely MP4-compatible so that ffmpeg can just do `-c:a copy`.
+    """
+    if audio_stream is None:
+        return False
+
+    subtype = (getattr(audio_stream, "subtype", "") or "").lower()
+    mime_type = (getattr(audio_stream, "mime_type", "") or "").lower()
+    audio_codec = (getattr(audio_stream, "audio_codec", "") or "").lower()
+
+    return (
+        subtype in {"m4a", "mp4"}
+        or "mp4" in mime_type
+        or "mp4a" in audio_codec
+    )
+
 
 
 def create_progress_bar(
@@ -162,31 +218,54 @@ def download_with_progress(
 
 # === Main script logic; everything before this was just warm up === 
 
-def download_video(url: str, output_dir: str = "downloads", force_best_quality: bool = False) -> None:
+def download_video(
+    url: str,
+    output_dir: str = "downloads",
+    force_best_quality: bool = False,
+    *,
+    exit_on_error: bool = True,
+    filename_prefix: str = "",
+    audio_codec: str = "copy",
+    audio_bitrate: str = "192k",
+    skip_existing: bool = False,
+    progress_prefix: str = "",
+) -> bool:
     """
-    Download a YouTube video from the provided url.
+    Download one video and return True on success, False on failure.
+    """
 
-    - If ffmpeg and adaptive stream exist:
-        * download best video-only stream (with progress bar)
-        * download best audio-only stream (with progress bar)
-        * merge both streams using ffmpeg into a final .mp4 file
-    - If ffmpeg or adaptive stream is not available:
-        * download the best progressive stream (video + audio in one file)
-          with a progress bar - progressive usually don't exceed 720p.
-    - If `force_best_quality` is True:
-        * always use adaptive mode (requires ffmpeg)
-    """
+    def fail(message: str, err: Optional[Exception] = None) -> bool:
+        if err is not None:
+            print(f"{LOG_ERR} {message}: {err}")
+        else:
+            print(f"{LOG_ERR} {message}")
+        if exit_on_error:
+            sys.exit(1)
+        return False
+
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
+
+    prefix = progress_prefix.strip()
+    if prefix and not prefix.endswith(" "):
+        prefix = f"{prefix} "
+
+    if audio_codec not in {"copy", "aac"}:
+        return fail("Invalid audio codec. Expected 'copy' or 'aac'.")
 
     try:
         print(f"{LOG_INFO} {BOLD}Fetching video info…{RESET}")
         yt = YouTube(url)
         title = yt.title or "video"
-        safe_title = sanitize_filename(title)
         print(f"{LOG_INFO} Title: {BOLD}{title}{RESET}")
 
-        # Best progressive stream (video + audio together)
+        final_basename = sanitize_filename(f"{filename_prefix}{title}")
+        final_output_path = output_dir_path / f"{final_basename}.mp4"
+
+        if skip_existing and final_output_path.exists():
+            print(f"{LOG_WARN} Skipping existing file: {BOLD}{final_output_path.name}{RESET}")
+            return True
+
         progressive_stream = (
             yt.streams
             .filter(progressive=True, file_extension="mp4")
@@ -195,7 +274,6 @@ def download_video(url: str, output_dir: str = "downloads", force_best_quality: 
             .first()
         )
 
-        # Best adaptive video-only stream
         video_stream = (
             yt.streams
             .filter(only_video=True, file_extension="mp4")
@@ -204,201 +282,273 @@ def download_video(url: str, output_dir: str = "downloads", force_best_quality: 
             .first()
         )
 
-        # Best adaptive audio-only stream (any extension)
-        audio_stream = (
-            yt.streams
-            .filter(only_audio=True)
-            .order_by("abr")
-            .desc()
-            .first()
-        )
+        audio_stream = select_best_audio_stream(yt)
 
         prog_res = resolution_value(progressive_stream)
         video_res = resolution_value(video_stream)
+        ffmpeg_available = is_ffmpeg_available()
 
         print(f"{LOG_INFO} Best progressive stream: {BOLD}{prog_res or 'N/A'}p{RESET}")
         print(f"{LOG_INFO} Best adaptive video-only stream: {BOLD}{video_res or 'N/A'}p{RESET}")
-        print(f"{LOG_INFO} ffmpeg available: {BOLD}{is_ffmpeg_available()}{RESET}")
+        print(f"{LOG_INFO} ffmpeg available: {BOLD}{ffmpeg_available}{RESET}")
 
-        # Check requirements for force_best_quality mode
         if force_best_quality:
-            if not is_ffmpeg_available():
-                print(
-                    f"{LOG_ERR} Error: --force-best requires ffmpeg to be installed. "
-                    f"Please install ffmpeg or remove the --force-best flag."
-                )
-                sys.exit(1)
+            if not ffmpeg_available:
+                return fail("--force-best requires ffmpeg in PATH.")
             if video_stream is None or audio_stream is None:
-                print(
-                    f"{LOG_ERR} Error: --force-best requires adaptive stream (video + audio provided as separate files)"
-                )
-                sys.exit(1)
+                return fail("--force-best requires adaptive video and audio streams.")
 
         use_adaptive = (
             force_best_quality
             or (
-                is_ffmpeg_available()
+                ffmpeg_available
                 and video_stream is not None
                 and audio_stream is not None
                 and video_res > prog_res
             )
         )
 
-        
-        # (Recommended) Adaptive mode: best quality video + audio, then merge with ffmpeg
         if use_adaptive:
             print(
                 f"\n{LOG_INFO} {BOLD}{GREEN}Using high-quality adaptive mode"
                 f" (video + audio + ffmpeg merge).{RESET}"
             )
 
-            
-            
-            # Video-only
             video_ext = video_stream.subtype or "mp4"
-            video_filename = f"{yt.video_id}_video.{video_ext}"
-            video_size = getattr(video_stream, "filesize", None) or getattr(
-                video_stream, "filesize_approx", None
-            )
-            if video_size:
-                print(
-                    f"{LOG_INFO} Video size: "
-                    f"{BOLD}{video_size / (1024 * 1024):.2f} MB{RESET}"
-                )
-
-            video_path = download_with_progress(
-                yt=yt,
-                stream=video_stream,
-                output_dir=output_dir_path,
-                description="Downloading video",
-                filename=video_filename,
-                colour="green",
-            )
-
-           
-            # Audio-only
             audio_ext = audio_stream.subtype or "m4a"
+
+            video_filename = f"{yt.video_id}_video.{video_ext}"
             audio_filename = f"{yt.video_id}_audio.{audio_ext}"
-            audio_size = getattr(audio_stream, "filesize", None) or getattr(
-                audio_stream, "filesize_approx", None
-            )
-            if audio_size:
-                print(
-                    f"{LOG_INFO} Audio size: "
-                    f"{BOLD}{audio_size / (1024 * 1024):.2f} MB{RESET}"
-                )
 
-            audio_path = download_with_progress(
-                yt=yt,
-                stream=audio_stream,
-                output_dir=output_dir_path,
-                description="Downloading audio",
-                filename=audio_filename,
-                colour="blue",
-            )
+            video_path = None
+            audio_path = None
 
-            
-            # Merge with ffmpeg
-            final_path = output_dir_path / f"{safe_title}.mp4"
-            print(
-                f"\n{LOG_INFO} Merging video and audio with ffmpeg into: "
-                f"{BOLD}{final_path.name}{RESET}"
-            )
-
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(video_path),
-                "-i",
-                str(audio_path),
-                "-c",
-                "copy",
-                str(final_path),
-            ]
-            subprocess.run(cmd, check=True)
-
-            # Optionally remove temporary files
             try:
-                video_path.unlink(missing_ok=True)
-                audio_path.unlink(missing_ok=True)
-            except TypeError:
-                if video_path.exists():
-                    video_path.unlink()
-                if audio_path.exists():
-                    audio_path.unlink()
-
-            print(f"\n{LOG_OK} The downloading and merging is complete!")
-            print(f"{LOG_INFO} File in this location: {BOLD}{final_path.resolve()}{RESET}")
-
-        
-        # Fallback to single progressive stream if adaptive fails
-        
-        else:
-            print(
-                f"\n{LOG_WARN} {BOLD}{YELLOW}Using progressive mode"
-                f" (single file: video + audio).{RESET}"
-            )
-
-            if progressive_stream is None:
-                print(f"{LOG_ERR} Could not find a suitable video stream.\nBoth progressive and adaptive modes have failed.\nThere might be a problem with the url. Check and try again.")
-                sys.exit(1)
-
-            file_size = getattr(progressive_stream, "filesize", None) or getattr(
-                progressive_stream, "filesize_approx", None
-            )
-            if file_size:
-                print(
-                    f"{LOG_INFO} Resolution: {BOLD}{progressive_stream.resolution}{RESET}"
+                video_path = download_with_progress(
+                    yt=yt,
+                    stream=video_stream,
+                    output_dir=output_dir_path,
+                    description=f"{prefix}Downloading video",
+                    filename=video_filename,
+                    colour="green",
                 )
-                print(
-                    f"{LOG_INFO} Size: "
-                    f"{BOLD}{file_size / (1024 * 1024):.2f} MB{RESET}"
+
+                audio_path = download_with_progress(
+                    yt=yt,
+                    stream=audio_stream,
+                    output_dir=output_dir_path,
+                    description=f"{prefix}Downloading audio",
+                    filename=audio_filename,
+                    colour="blue",
                 )
-            print(f"{LOG_INFO} Output directory: {BOLD}{output_dir_path.resolve()}{RESET}")
 
-            final_path = download_with_progress(
-                yt=yt,
-                stream=progressive_stream,
-                output_dir=output_dir_path,
-                description="Downloading",
-                filename=f"{safe_title}.mp4",
-                colour="magenta",
-            )
+                effective_audio_codec = audio_codec
+                if audio_codec == "copy" and not can_copy_audio_to_mp4(audio_stream):
+                    print(f"{LOG_WARN} Audio stream is not MP4-copy-safe; falling back to AAC.")
+                    effective_audio_codec = "aac"
 
-            print(f"\n{LOG_OK} Download completed!")
-            print(f"{LOG_INFO} File saved to: {BOLD}{final_path.resolve()}{RESET}")
+                print(
+                    f"\n{LOG_INFO} Merging video and audio with ffmpeg into: "
+                    f"{BOLD}{final_output_path.name}{RESET}"
+                )
+
+                merge_cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(video_path),
+                    "-i",
+                    str(audio_path),
+                    "-c:v",
+                    "copy",
+                ]
+
+                if effective_audio_codec == "copy":
+                    merge_cmd.extend(["-c:a", "copy", str(final_output_path)])
+                else:
+                    merge_cmd.extend(["-c:a", "aac", "-b:a", audio_bitrate, str(final_output_path)])
+
+                try:
+                    subprocess.run(merge_cmd, check=True)
+                except subprocess.CalledProcessError as merge_err:
+                    if effective_audio_codec == "copy":
+                        print(f"{LOG_WARN} Copy-merge failed; retrying with AAC re-encode.")
+                        retry_cmd = [
+                            "ffmpeg",
+                            "-y",
+                            "-i",
+                            str(video_path),
+                            "-i",
+                            str(audio_path),
+                            "-c:v",
+                            "copy",
+                            "-c:a",
+                            "aac",
+                            "-b:a",
+                            audio_bitrate,
+                            str(final_output_path),
+                        ]
+                        try:
+                            subprocess.run(retry_cmd, check=True)
+                        except subprocess.CalledProcessError as retry_err:
+                            return fail("ffmpeg merge failed after AAC retry", retry_err)
+                    else:
+                        return fail("ffmpeg merge failed", merge_err)
+
+            finally:
+                for temp_path in (video_path, audio_path):
+                    if temp_path is None:
+                        continue
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                    except TypeError:
+                        if temp_path.exists():
+                            temp_path.unlink()
+
+            print(f"\n{LOG_OK} Download and merge complete!")
+            print(f"{LOG_INFO} File saved to: {BOLD}{final_output_path.resolve()}{RESET}")
+            return True
+
+        print(
+            f"\n{LOG_WARN} {BOLD}{YELLOW}Using progressive mode"
+            f" (single file: video + audio).{RESET}"
+        )
+
+        if progressive_stream is None:
+            return fail("No suitable progressive stream found, and adaptive mode is unavailable.")
+
+        final_path = download_with_progress(
+            yt=yt,
+            stream=progressive_stream,
+            output_dir=output_dir_path,
+            description=f"{prefix}Downloading",
+            filename=final_output_path.name,
+            colour="magenta",
+        )
+
+        print(f"\n{LOG_OK} Download completed!")
+        print(f"{LOG_INFO} File saved to: {BOLD}{final_path.resolve()}{RESET}")
+        return True
 
     except PytubeFixError as e:
-        print(f"{LOG_ERR} YouTube / pytubefix error: {e}")
-        sys.exit(1)
+        return fail("YouTube / pytubefix error", e)
     except KeyboardInterrupt:
-        print(f"\n{LOG_ERR} Download interrupted by user with C^ .")
-        sys.exit(1)
-    except subprocess.CalledProcessError as e:
-        print(f"{LOG_ERR} ffmpeg execution error: {e}")
-        sys.exit(1)
+        return fail("Download interrupted by user")
     except Exception as e:
-        print(f"{LOG_ERR} Unexpected error: {e}")
-        sys.exit(1)
+        return fail("Unexpected error", e)
+
+
+def download_playlist(
+    url: str,
+    output_dir: str = "downloads",
+    force_best_quality: bool = False,
+    *,
+    start: int = 1,
+    end: Optional[int] = None,
+    stop_on_error: bool = False,
+    audio_codec: str = "copy",
+    audio_bitrate: str = "192k",
+    skip_existing: bool = False,
+    flat_output: bool = False,
+    delay: float = 0.0,
+) -> bool:
+    """
+    downloads allplaylist items  by iterating each video URL through download_video().
+    """
+    try:
+        playlist = Playlist(url)
+        playlist_title = playlist.title or "playlist"
+        all_urls = list(playlist.video_urls)
+    except Exception as e:
+        print(f"{LOG_ERR} Failed to load playlist: {e}")
+        return False
+
+    if not all_urls:
+        print(f"{LOG_ERR} Playlist contains no videos.")
+        return False
+
+    total_items = len(all_urls)
+
+    if start < 1:
+        print(f"{LOG_WARN} --start must be >= 1. Using 1.")
+        start = 1
+
+    if end is None or end > total_items:
+        end = total_items
+
+    if end < start:
+        print(f"{LOG_ERR} Invalid range: start ({start}) is greater than end ({end}).")
+        return False
+
+    selected_urls = all_urls[start - 1:end]
+    selected_total = len(selected_urls)
+
+    playlist_output_dir = Path(output_dir)
+    if not flat_output:
+        playlist_output_dir = playlist_output_dir / safe_playlist_dir_name(playlist_title)
+    playlist_output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"{LOG_INFO} Playlist: {BOLD}{playlist_title}{RESET}")
+    print(f"{LOG_INFO} Items selected: {BOLD}{selected_total}{RESET} (range {start}-{end})")
+    print(f"{LOG_INFO} Output directory: {BOLD}{playlist_output_dir.resolve()}{RESET}")
+
+    failures: List[Tuple[int, str]] = []
+    pad_width = len(str(end))
+
+    for idx, video_url in enumerate(selected_urls, start=start):
+        current = idx - start + 1
+        progress_prefix = f"[{current}/{selected_total}]"
+        filename_prefix = f"{idx:0{pad_width}d} - "
+
+        print(f"\n{LOG_INFO} {BOLD}{progress_prefix} Processing item #{idx}{RESET}")
+
+        ok = download_video(
+            video_url,
+            output_dir=str(playlist_output_dir),
+            force_best_quality=force_best_quality,
+            exit_on_error=False,
+            filename_prefix=filename_prefix,
+            audio_codec=audio_codec,
+            audio_bitrate=audio_bitrate,
+            skip_existing=skip_existing,
+            progress_prefix=progress_prefix,
+        )
+
+        if not ok:
+            failures.append((idx, video_url))
+            if stop_on_error:
+                print(f"{LOG_WARN} Stopping early because --stop-on-error is set.")
+                break
+
+        if delay > 0 and current < selected_total:
+            time.sleep(delay)
+
+    success_count = selected_total - len(failures)
+
+    print(f"\n{LOG_INFO} {BOLD}Playlist summary{RESET}")
+    print(f"{LOG_OK} Successful: {success_count}")
+    print(f"{LOG_WARN} Failed: {len(failures)}")
+
+    if failures:
+        print(f"{LOG_WARN} Failed items:")
+        for failed_idx, failed_url in failures:
+            print(f"  - #{failed_idx}: {failed_url}")
+
+    return len(failures) == 0
 
 
 
-# === The CLI entry point ===
+
+# === The CLI entry configuration ===
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Downloads a YouTube video in the best available quality.\n"
-            "If ffmpeg is installed and a higher-resolution adaptive stream exists, "
-            "downloads video and audio tracks separately (each with a progress bar) "
-            "and then merges them."
+            "Download a YouTube video or playlist in best available quality.\n"
+            "Uses DASH method (video+audio tracks downloaded separately) when beneficial and if ffmpeg is available."
         )
     )
-    parser.add_argument(
-        "url",
-        help="URL of the YouTube video to download",
-    )
+    parser.add_argument("url", help="URL of the YouTube video or playlist")
     parser.add_argument(
         "-o",
         "--output",
@@ -409,14 +559,84 @@ def parse_args() -> argparse.Namespace:
         "-f",
         "--force-best",
         action="store_true",
-        help="Force best quality mode (using DASH technique and merging with ffmpeg)",
+        help="Forces adaptive best-quality mode (requires ffmpeg)",
+    )
+    parser.add_argument(
+        "--playlist",
+        action="store_true",
+        help="Treat URL as playlist even if auto-detection does not match",
+    )
+    parser.add_argument("--start", type=int, default=1, help="Playlist start index (1-based)")
+    parser.add_argument("--end", type=int, default=None, help="Playlist end index (inclusive)")
+    parser.add_argument(
+        "--stop-on-error",
+        action="store_true",
+        help="Stop playlist download on first failed item",
+    )
+    parser.add_argument(
+        "--audio-codec",
+        choices=("copy", "aac"),
+        default="copy",
+        help="Audio strategy for adaptive merge (default: copy, auto-fallback to aac if unsafe)",
+    )
+    parser.add_argument(
+        "--audio-bitrate",
+        default="192k",
+        help="AAC bitrate used when re-encoding (default: 192k)",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip download if output file already exists",
+    )
+    parser.add_argument(
+        "--flat-output",
+        action="store_true",
+        help="Do not create playlist subfolder; write directly into --output",
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.0,
+        help="Delay in seconds between playlist items (default: 0)",
     )
     return parser.parse_args()
 
 
+
+
 def main() -> None:
     args = parse_args()
-    download_video(args.url, args.output, args.force_best)
+
+    playlist_mode = args.playlist or is_playlist_url(args.url)
+
+    if playlist_mode:
+        ok = download_playlist(
+            args.url,
+            output_dir=args.output,
+            force_best_quality=args.force_best,
+            start=args.start,
+            end=args.end,
+            stop_on_error=args.stop_on_error,
+            audio_codec=args.audio_codec,
+            audio_bitrate=args.audio_bitrate,
+            skip_existing=args.skip_existing,
+            flat_output=args.flat_output,
+            delay=args.delay,
+        )
+    else:
+        ok = download_video(
+            args.url,
+            output_dir=args.output,
+            force_best_quality=args.force_best,
+            exit_on_error=False,
+            audio_codec=args.audio_codec,
+            audio_bitrate=args.audio_bitrate,
+            skip_existing=args.skip_existing,
+        )
+
+    if not ok:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

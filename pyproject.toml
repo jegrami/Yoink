@@ -10,3 +10,9 @@ dependencies = [
     "pytubefix>=10.3.8",
     "tqdm>=4.67.3",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+
