@@ -44,13 +44,42 @@ RED = f"{ESC}[91m"
 YELLOW = f"{ESC}[93m"
 BLUE = f"{ESC}[94m"
 MAGENTA = f"{ESC}[95m"
+CYAN = f"{ESC}[96m"
 
 
-# === Messages that get printed to stdout ===
+# === Tags that get printed to stdout alongside the video file downloading process===
 LOG_INFO = f"{BLUE}[+]{RESET}"
 LOG_OK   = f"{GREEN}[✓]{RESET}"
 LOG_WARN = f"{YELLOW}[!]{RESET}"
 LOG_ERR  = f"{RED}[-]{RESET}"
+
+
+def tone_info(text: str) -> str:
+    return f"{BLUE}{text}{RESET}"
+
+
+def tone_action(text: str) -> str:
+    return f"{CYAN}{text}{RESET}"
+
+
+def tone_title(text: str) -> str:
+    return f"{BOLD}{MAGENTA}{text}{RESET}"
+
+
+def tone_path(text: str) -> str:
+    return f"{BOLD}{CYAN}{text}{RESET}"
+
+
+def tone_ok(text: str) -> str:
+    return f"{BOLD}{GREEN}{text}{RESET}"
+
+
+def tone_warn(text: str) -> str:
+    return f"{YELLOW}{text}{RESET}"
+
+
+def tone_err(text: str) -> str:
+    return f"{RED}{text}{RESET}"
 
 
 # === Helper functions === 
@@ -254,16 +283,16 @@ def download_video(
         return fail("Invalid audio codec. Expected 'copy' or 'aac'.")
 
     try:
-        print(f"{LOG_INFO} {BOLD}Fetching video info…{RESET}")
+        print(f"{LOG_INFO} {tone_action('Fetching video info…')}")
         yt = YouTube(url)
         title = yt.title or "video"
-        print(f"{LOG_INFO} Title: {BOLD}{title}{RESET}")
+        print(f"{LOG_INFO} {tone_info('Title:')} {tone_title(title)}")
 
         final_basename = sanitize_filename(f"{filename_prefix}{title}")
         final_output_path = output_dir_path / f"{final_basename}.mp4"
 
         if skip_existing and final_output_path.exists():
-            print(f"{LOG_WARN} Skipping existing file: {BOLD}{final_output_path.name}{RESET}")
+            print(f"{LOG_WARN} {tone_warn('Skipping existing file:')} {tone_title(final_output_path.name)}")
             return True
 
         progressive_stream = (
@@ -288,9 +317,15 @@ def download_video(
         video_res = resolution_value(video_stream)
         ffmpeg_available = is_ffmpeg_available()
 
-        print(f"{LOG_INFO} Best progressive stream: {BOLD}{prog_res or 'N/A'}p{RESET}")
-        print(f"{LOG_INFO} Best adaptive video-only stream: {BOLD}{video_res or 'N/A'}p{RESET}")
-        print(f"{LOG_INFO} ffmpeg available: {BOLD}{ffmpeg_available}{RESET}")
+        prog_label = prog_res or "N/A"
+        video_label = video_res or "N/A"
+        prog_tone = tone_ok(f"{prog_label}p") if prog_res else tone_warn(f"{prog_label}p")
+        video_tone = tone_ok(f"{video_label}p") if video_res else tone_warn(f"{video_label}p")
+        ffmpeg_tone = tone_ok(str(ffmpeg_available)) if ffmpeg_available else tone_err(str(ffmpeg_available))
+
+        print(f"{LOG_INFO} {tone_info('Best progressive stream:')} {prog_tone}")
+        print(f"{LOG_INFO} {tone_info('Best adaptive video-only stream:')} {video_tone}")
+        print(f"{LOG_INFO} {tone_info('ffmpeg available:')} {ffmpeg_tone}")
 
         if force_best_quality:
             if not ffmpeg_available:
@@ -310,8 +345,8 @@ def download_video(
 
         if use_adaptive:
             print(
-                f"\n{LOG_INFO} {BOLD}{GREEN}Using high-quality adaptive mode"
-                f" (video + audio + ffmpeg merge).{RESET}"
+                f"\n{LOG_INFO} {tone_ok('Using high-quality adaptive mode')}"
+                f" {tone_action('(video + audio + ffmpeg merge).')}"
             )
 
             video_ext = video_stream.subtype or "mp4"
@@ -339,17 +374,20 @@ def download_video(
                     output_dir=output_dir_path,
                     description=f"{prefix}Downloading audio",
                     filename=audio_filename,
-                    colour="blue",
+                    colour="cyan",
                 )
 
                 effective_audio_codec = audio_codec
                 if audio_codec == "copy" and not can_copy_audio_to_mp4(audio_stream):
-                    print(f"{LOG_WARN} Audio stream is not MP4-copy-safe; falling back to AAC.")
+                    print(
+                        f"{LOG_WARN} {tone_warn('Audio stream is not MP4-copy-safe; falling back to')} "
+                        f"{tone_title('AAC')}{tone_warn('.')}"
+                    )
                     effective_audio_codec = "aac"
 
                 print(
-                    f"\n{LOG_INFO} Merging video and audio with ffmpeg into: "
-                    f"{BOLD}{final_output_path.name}{RESET}"
+                    f"\n{LOG_INFO} {tone_action('Merging video and audio with ffmpeg into:')} "
+                    f"{tone_title(final_output_path.name)}"
                 )
 
                 merge_cmd = [
@@ -372,7 +410,10 @@ def download_video(
                     subprocess.run(merge_cmd, check=True)
                 except subprocess.CalledProcessError as merge_err:
                     if effective_audio_codec == "copy":
-                        print(f"{LOG_WARN} Copy-merge failed; retrying with AAC re-encode.")
+                        print(
+                            f"{LOG_WARN} {tone_warn('Copy-merge failed; retrying with')} "
+                            f"{tone_title('AAC re-encode')}{tone_warn('.')}"
+                        )
                         retry_cmd = [
                             "ffmpeg",
                             "-y",
@@ -405,13 +446,13 @@ def download_video(
                         if temp_path.exists():
                             temp_path.unlink()
 
-            print(f"\n{LOG_OK} Download and merge complete!")
-            print(f"{LOG_INFO} File saved to: {BOLD}{final_output_path.resolve()}{RESET}")
+            print(f"\n{LOG_OK} {tone_ok('Download and merge complete!')}")
+            print(f"{LOG_INFO} {tone_info('File saved to:')} {tone_path(str(final_output_path.resolve()))}")
             return True
 
         print(
-            f"\n{LOG_WARN} {BOLD}{YELLOW}Using progressive mode"
-            f" (single file: video + audio).{RESET}"
+            f"\n{LOG_WARN} {tone_warn('Using progressive mode')}"
+            f" {tone_action('(single file: video + audio).')}"
         )
 
         if progressive_stream is None:
@@ -426,8 +467,8 @@ def download_video(
             colour="magenta",
         )
 
-        print(f"\n{LOG_OK} Download completed!")
-        print(f"{LOG_INFO} File saved to: {BOLD}{final_path.resolve()}{RESET}")
+        print(f"\n{LOG_OK} {tone_ok('Download completed!')}")
+        print(f"{LOG_INFO} {tone_info('File saved to:')} {tone_path(str(final_path.resolve()))}")
         return True
 
     except PytubeFixError as e:
@@ -460,24 +501,24 @@ def download_playlist(
         playlist_title = playlist.title or "playlist"
         all_urls = list(playlist.video_urls)
     except Exception as e:
-        print(f"{LOG_ERR} Failed to load playlist: {e}")
+        print(f"{LOG_ERR} {tone_err('Failed to load playlist:')} {e}")
         return False
 
     if not all_urls:
-        print(f"{LOG_ERR} Playlist contains no videos.")
+        print(f"{LOG_ERR} {tone_err('Playlist contains no videos.')}")
         return False
 
     total_items = len(all_urls)
 
     if start < 1:
-        print(f"{LOG_WARN} --start must be >= 1. Using 1.")
+        print(f"{LOG_WARN} {tone_warn('--start must be >= 1. Using 1.')}")
         start = 1
 
     if end is None or end > total_items:
         end = total_items
 
     if end < start:
-        print(f"{LOG_ERR} Invalid range: start ({start}) is greater than end ({end}).")
+        print(f"{LOG_ERR} {tone_err('Invalid range:')} start ({start}) is greater than end ({end}).")
         return False
 
     selected_urls = all_urls[start - 1:end]
@@ -488,9 +529,9 @@ def download_playlist(
         playlist_output_dir = playlist_output_dir / safe_playlist_dir_name(playlist_title)
     playlist_output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"{LOG_INFO} Playlist: {BOLD}{playlist_title}{RESET}")
-    print(f"{LOG_INFO} Items selected: {BOLD}{selected_total}{RESET} (range {start}-{end})")
-    print(f"{LOG_INFO} Output directory: {BOLD}{playlist_output_dir.resolve()}{RESET}")
+    print(f"{LOG_INFO} {tone_info('Playlist:')} {tone_title(playlist_title)}")
+    print(f"{LOG_INFO} {tone_info('Items selected:')} {tone_ok(str(selected_total))} (range {start}-{end})")
+    print(f"{LOG_INFO} {tone_info('Output directory:')} {tone_path(str(playlist_output_dir.resolve()))}")
 
     failures: List[Tuple[int, str]] = []
     pad_width = len(str(end))
@@ -500,7 +541,7 @@ def download_playlist(
         progress_prefix = f"[{current}/{selected_total}]"
         filename_prefix = f"{idx:0{pad_width}d} - "
 
-        print(f"\n{LOG_INFO} {BOLD}{progress_prefix} Processing item #{idx}{RESET}")
+        print(f"\n{LOG_INFO} {tone_title(progress_prefix)} {tone_action(f'Processing item #{idx}')}")
 
         ok = download_video(
             video_url,
@@ -517,7 +558,7 @@ def download_playlist(
         if not ok:
             failures.append((idx, video_url))
             if stop_on_error:
-                print(f"{LOG_WARN} Stopping early because --stop-on-error is set.")
+                print(f"{LOG_WARN} {tone_warn('Stopping early because --stop-on-error is set.')}")
                 break
 
         if delay > 0 and current < selected_total:
@@ -525,12 +566,14 @@ def download_playlist(
 
     success_count = selected_total - len(failures)
 
-    print(f"\n{LOG_INFO} {BOLD}Playlist summary{RESET}")
-    print(f"{LOG_OK} Successful: {success_count}")
-    print(f"{LOG_WARN} Failed: {len(failures)}")
+    print(f"\n{LOG_INFO} {tone_title('Playlist summary')}")
+    print(f"{LOG_OK} {tone_ok('Successful:')} {tone_ok(str(success_count))}")
+    fail_count = len(failures)
+    fail_count_tone = tone_ok(str(fail_count)) if fail_count == 0 else tone_err(str(fail_count))
+    print(f"{LOG_WARN} {tone_warn('Failed:')} {fail_count_tone}")
 
     if failures:
-        print(f"{LOG_WARN} Failed items:")
+        print(f"{LOG_WARN} {tone_warn('Failed items:')}")
         for failed_idx, failed_url in failures:
             print(f"  - #{failed_idx}: {failed_url}")
 
@@ -641,9 +684,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
 
 
 

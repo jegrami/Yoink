@@ -1,6 +1,6 @@
 # yoink 🎬
 
-A simple CLI utility for downloading YouTube videos in the best available quality. Automatically uses DASH (adaptive streams + ffmpeg merge) when it makes sense. Falls back to progressive mode when it doesn't.
+**yoink** is a simple CLI utility for downloading YouTube videos in the best available quality. Automatically uses DASH (adaptive streams + ffmpeg merge) when it makes sense. Falls back to progressive mode when it doesn't.
 
 **yoink** is a verb, and that's why it's spelled lowercase, even at the beginning of a sentence.
 
@@ -50,13 +50,13 @@ uv run yoink.py "https://youtube.com/watch?v=dQw4w9WgXcQ"
 ### Force best quality (requires ffmpeg)
 
 ```bash
-uv run yoink.py "https://youtube.com/watch?v=dQw4w9WgXcQ" --force-best
+uv run yoink.py --force-best "https://youtube.com/watch?v=dQw4w9WgXcQ" 
 ```
 
 ### Download to a specific folder
 
 ```bash
-uv run yoink.py "https://youtube.com/watch?v=dQw4w9WgXcQ" -o Videos/
+uv run yoink.py -o Videos/ "https://youtube.com/watch?v=dQw4w9WgXcQ" 
 ```
 
 ### Download a playlist
@@ -68,13 +68,13 @@ yoink auto-detects playlist URLs, so `--playlist` is optional. But you can use i
 uv run yoink.py "https://youtube.com/playlist?list=PLxxx"
 
 # or explicit
-uv run yoink.py "https://youtube.com/playlist?list=PLxxx" --playlist
+uv run yoink.py --playlist "https://youtube.com/playlist?list=PLxxx" 
 ```
 
 ### Download items 3–10 of a playlist, with a 2-second delay between each
 
 ```bash
-uv run yoink.py "https://youtube.com/playlist?list=PLxxx" --start 3 --end 10 --delay 2
+uv run yoink.py --start 3 --end 10 --delay 2 "https://youtube.com/playlist?list=PLxxx"
 ```
 
 ---
@@ -133,6 +133,10 @@ uv run pytest -v
 
 ---
 
+### built with
+- pytubefix 
+- tqdm
+- ffmpeg
 
 
 ## Author
